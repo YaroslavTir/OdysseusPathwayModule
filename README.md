@@ -130,17 +130,3 @@ The returned object contains:
 - `$summary` — high-level statistics (vertices, edges, depth, unique
   events)
 - `$eventNameLookup` — named vector mapping combo IDs to event names
-
-## Plotting
-
-For Sankey and Sunburst visualization, use the companion package
-`OdysseusPathwayPlots`.
-
-## Development notes
-
-`README.md` is generated from `README.Rmd`. After editing this file,
-regenerate with:
-
-``` r
-devtools::build_readme()
-```
