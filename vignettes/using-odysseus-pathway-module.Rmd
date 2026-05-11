@@ -1,0 +1,377 @@
+---
+title: "Using OdysseusPathwayModule"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Using OdysseusPathwayModule}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+## Overview
+
+OdysseusPathwayModule provides cohort pathway analysis for pre-instantiated
+OMOP cohorts. The package focuses on one core workflow:
+
+1. create or identify a target cohort and one or more event cohorts,
+2. run pathway analysis with `executeCohortPathways()`, and
+3. inspect pathway sequences, counts, and event-code mappings.
+
+The package supports two analysis modes:
+
+1. **Post-index** (`analysisType = "post-index"`, default): events occurring 
+   *after* the target cohort index date.
+2. **Pre-index** (`analysisType = "pre-index"`): events occurring *before* the 
+   target cohort index date in a configurable lookback window.
+
+Target and event cohorts can reside in the same cohort table or in separate
+tables and schemas.
+
+## Setup
+
+```{r setup, eval=FALSE}
+library(OdysseusPathwayModule)
+library(Eunomia)
+
+connectionDetails <- Eunomia::getEunomiaConnectionDetails()
+```
+
+## Create Example Cohorts with Eunomia
+
+```{r cohorts, eval=FALSE}
+generationSet <- Eunomia::createCohorts(connectionDetails)
+
+generationSet
+```
+
+In the standard Eunomia example database, `createCohorts()` materializes four
+cohorts in `main.cohort`:
+
+- `1`: Celecoxib
+- `2`: Diclofenac
+- `3`: GiBleed
+- `4`: NSAIDs
+
+For the examples below, use `NSAIDs` (`cohortId = 4`) as the **target cohort**
+and `Celecoxib`, `Diclofenac`, and `GiBleed` (`cohortId = 1:3`) as **event cohorts**.
+
+## Run Post-Index Pathway Analysis
+
+This is the default mode. It asks: what events happen after entry into the target cohort?
+
+```{r post_index, eval=FALSE}
+postIndexResults <- executeCohortPathways(
+  connectionDetails = connectionDetails,
+  cohortDatabaseSchema = "main",
+  cohortTableName = "cohort",
+  targetCohortIds = 4,
+  eventCohortIds = c(1, 2, 3),
+  maxDepth = 3,
+  collapseWindow = 30
+)
+```
+
+The result is a named list of analysis outputs:
+
+```{r post_index_names, eval=FALSE}
+names(postIndexResults)
+```
+
+The two most useful tables to inspect first are pathway-level counts and the
+event-code mapping used to decode combinations:
+
+```{r post_index_inspect, eval=FALSE}
+head(postIndexResults$pathwaysAnalysisPathsData)
+head(postIndexResults$pathwayAnalysisCodesLong)
+```
+
+## Run Pre-Index Pathway Analysis
+
+Pre-index mode asks: what events occurred before the target cohort entry date,
+within a configurable lookback window?
+
+```{r pre_index, eval=FALSE}
+preIndexResults <- executeCohortPathways(
+  connectionDetails = connectionDetails,
+  cohortDatabaseSchema = "main",
+  cohortTableName = "cohort",
+  targetCohortIds = 4,
+  eventCohortIds = c(1, 2, 3),
+  analysisType = "pre-index",
+  lookbackStartDay = -365,
+  lookbackEndDay = -1,
+  maxDepth = 3,
+  collapseWindow = 30
+)
+```
+
+You can narrow the lookback window without changing any other arguments:
+
+```{r pre_index_90, eval=FALSE}
+preIndex90 <- executeCohortPathways(
+  connectionDetails = connectionDetails,
+  cohortDatabaseSchema = "main",
+  cohortTableName = "cohort",
+  targetCohortIds = 4,
+  eventCohortIds = c(1, 2, 3),
+  analysisType = "pre-index",
+  lookbackStartDay = -90,
+  lookbackEndDay = -1,
+  maxDepth = 3
+)
+```
+
+## Understanding the Returned Objects
+
+`executeCohortPathways()` returns several tables, each serving a different purpose:
+
+- `pathwayAnalysisStatsData`: summary-level analysis metadata and counts.
+- `pathwaysAnalysisPathsData`: pathway sequences with `step1`, `step2`, ... and person counts.
+- `pathwaysAnalysisEventsData`: event-level counts.
+- `pathwaycomboIds`: unique event-combination codes observed in the pathways.
+- `pathwayAnalysisCodesLong`: long-form decoding of combination codes into event cohorts.
+- `isCombo`: identifies whether a code represents a single event or a multi-event combination.
+- `pathwayAnalysisCodesData`: compact code lookup table.
+
+For example, to inspect only the decoded event combinations:
+
+```{r code_mapping, eval=FALSE}
+subset(
+  postIndexResults$pathwayAnalysisCodesLong,
+  select = c(pathwayAnalysisGenerationId, code, targetCohortId, eventCohortId, isCombo, numberOfEvents)
+)
+```
+
+## Using Separate Target and Event Cohort Tables
+
+The core function also supports separate target and event tables. In the Eunomia
+SQLite example, you can create those tables directly from `main.cohort`:
+
+```{r separate_tables, eval=FALSE}
+connection <- DatabaseConnector::connect(connectionDetails)
+
+DatabaseConnector::executeSql(connection, "DROP TABLE IF EXISTS target_cohorts;")
+DatabaseConnector::executeSql(connection, "DROP TABLE IF EXISTS event_cohorts;")
+
+DatabaseConnector::executeSql(
+  connection,
+  "CREATE TABLE target_cohorts AS
+     SELECT *
+     FROM main.cohort
+     WHERE cohort_definition_id = 4;"
+)
+
+DatabaseConnector::executeSql(
+  connection,
+  "CREATE TABLE event_cohorts AS
+     SELECT *
+     FROM main.cohort
+     WHERE cohort_definition_id IN (1, 2, 3);"
+)
+
+resultsSeparateTables <- executeCohortPathways(
+  connectionDetails = connectionDetails,
+  cohortDatabaseSchema = "main",
+  cohortTableName = "target_cohorts",
+  outcomeDatabaseSchema = "main",
+  outcomeTableName = "event_cohorts",
+  targetCohortIds = 4,
+  eventCohortIds = c(1, 2, 3)
+)
+
+DatabaseConnector::disconnect(connection)
+```
+
+This is useful when target cohorts and event cohorts are managed by different
+ETL or cohort-generation steps.
+
+## Building an Event Sequence Graph
+
+The raw pathway output uses bitmask-encoded combo IDs. Use
+`buildEventSequenceGraph()` to decode these into a directed **igraph** graph
+with human-readable event names, transition edges, and probabilities.
+
+**Note:** The simplified Eunomia example database produces only single-step
+pathways (each patient has exactly one event after the target index date).
+`buildEventSequenceGraph()` requires at least two steps to construct transition
+edges.  On real-world OMOP data with richer treatment histories, the pathway
+output from `executeCohortPathways()` will typically contain multiple steps and
+can be passed directly to `buildEventSequenceGraph()`.
+
+The example below constructs a small mock pathway result set that mirrors the
+structure returned by `executeCohortPathways()`, so you can see the full
+graph-building workflow in action:
+
+```{r esg_mock_data, eval=FALSE}
+# --- Mock cpResults with multi-step pathways ---
+# Bitmask combo codes: 2 = Celecoxib, 4 = Diclofenac, 8 = GiBleed
+mockPathsData <- data.frame(
+  pathwayAnalysisGenerationId = rep(1L, 5),
+  targetCohortId              = rep(4L, 5),
+  step1      = c( 2L,  2L,  4L,  4L,  2L),
+  step2      = c( 4L,  8L,  2L,  8L, NA),
+  step3      = c( 8L, NA,   8L, NA,  NA),
+  countValue = c(120L, 80L, 95L, 65L, 40L)
+)
+
+mockCodesLong <- data.frame(
+  pathwayAnalysisGenerationId = rep(1L, 3),
+  code           = c(2L, 4L, 8L),
+  targetCohortId = rep(4L, 3),
+  eventCohortId  = c(1L, 2L, 3L),
+  isCombo        = rep(0L, 3),
+  numberOfEvents = rep(1L, 3)
+)
+
+mockIsCombo <- data.frame(
+  targetCohortId = rep(4L, 3),
+  comboId        = c(2L, 4L, 8L),
+  numberOfEvents = rep(1L, 3),
+  isCombo        = rep(0L, 3)
+)
+
+mockCpResults <- list(
+  pathwayAnalysisStatsData   = data.frame(
+    pathwayAnalysisGenerationId = 1L,
+    targetCohortId = 4L,
+    countValue = 400L
+  ),
+  pathwaysAnalysisPathsData  = mockPathsData,
+  pathwaysAnalysisEventsData = data.frame(eventCohortId = 1:3, countValue = c(240L, 215L, 360L)),
+  pathwaycomboIds            = data.frame(comboIds = c(2L, 4L, 8L)),
+  pathwayAnalysisCodesLong   = mockCodesLong,
+  isCombo                    = mockIsCombo,
+  pathwayAnalysisCodesData   = data.frame(
+    pathwayAnalysisGenerationId = rep(1L, 3),
+    code    = c(2L, 4L, 8L),
+    isCombo = rep(0L, 3)
+  )
+)
+```
+
+Now build the graph using a generation set that maps cohort IDs to names:
+
+```{r event_sequence_graph, eval=FALSE}
+# Map cohort IDs to human-readable names
+generationSet <- data.frame(
+  cohortId   = c(1L, 2L, 3L, 4L),
+  cohortName = c("Celecoxib", "Diclofenac", "GiBleed", "NSAIDs")
+)
+
+esg <- buildEventSequenceGraph(
+  cpResults     = mockCpResults,
+  generationSet = generationSet,
+  maxSteps      = 3,
+  minCount      = 1
+)
+
+# Print a summary
+esg
+```
+
+When working with real `executeCohortPathways()` output, use the generation set
+from `Eunomia::createCohorts()` (renaming `name` to `cohortName`):
+
+```{r esg_real_note, eval=FALSE}
+# With real data:
+# generationSet <- Eunomia::createCohorts(connectionDetails)
+# generationSet$cohortName <- generationSet$name
+#
+# esg <- buildEventSequenceGraph(
+#   cpResults     = postIndexResults,
+#   generationSet = generationSet,
+#   maxSteps      = 3,
+#   minCount      = 5
+# )
+```
+
+The returned object is a list of class `"event_sequence_graph"` with four
+components:
+
+```{r graph_components, eval=FALSE}
+# The igraph object — vertices are (event, step) pairs, edges are transitions
+ig <- esg$graph
+
+# Vertex attributes
+igraph::V(ig)$eventName   # human-readable event names
+igraph::V(ig)$step        # pathway step number
+igraph::V(ig)$count       # patient count at this node
+igraph::V(ig)$share       # share within the step (sums to 1)
+
+# Edge attributes
+igraph::E(ig)$weight      # patient count crossing this transition
+igraph::E(ig)$probability # transition probability (sums to 1 per source)
+igraph::E(ig)$sourceStep
+igraph::E(ig)$targetStep
+
+# Decoded pathways
+head(esg$sequences)
+
+# Summary statistics
+esg$summary
+```
+
+### Quick visualization
+
+`plot()` is defined on the returned object and produces a layered graph using
+igraph's Sugiyama layout. Nodes are sized by patient count and colored by event
+identity (same event = same color across steps). Edge widths are proportional
+to transition weights.
+
+```{r plot_esg, eval=FALSE}
+# Default plot
+plot(esg)
+
+# Customized plot
+plot(esg,
+  colorPalette    = c("#1b9e77", "#d95f02", "#7570b3"),
+  edgeWidthRange  = c(1, 10),
+  vertexSizeRange = c(10, 30),
+  main            = "Post-Index Treatment Pathways"
+)
+```
+
+### Transition probabilities
+
+Each edge carries a `probability` attribute — the fraction of patients at a
+source event (within a step) who transition to each target:
+
+```{r transition_probs, eval=FALSE}
+# Extract edge data frame
+edgeDf <- igraph::as_data_frame(esg$graph, what = "edges")
+
+# View transitions from Step 1 to Step 2
+edgeDf[edgeDf$sourceStep == 1, ]
+```
+
+### Downstream igraph analysis
+
+Because the result is a standard igraph object, the full igraph API is
+available for network analysis:
+
+```{r igraph_analysis, eval=FALSE}
+ig <- esg$graph
+
+# Out-degree: how many distinct next-step events each node leads to
+igraph::degree(ig, mode = "out")
+
+# Weighted betweenness (inverse weight = lower traffic → higher betweenness)
+igraph::betweenness(ig, weights = 1 / igraph::E(ig)$weight)
+
+# Shortest weighted paths between all pairs
+igraph::distances(ig, weights = 1 / igraph::E(ig)$weight)
+
+# Identify hubs and authorities (HITS)
+igraph::hub_score(ig, weights = igraph::E(ig)$weight)$vector
+igraph::authority_score(ig, weights = igraph::E(ig)$weight)$vector
+
+# Export to data frames for use outside igraph
+vertDf <- igraph::as_data_frame(ig, what = "vertices")
+edgeDf <- igraph::as_data_frame(ig, what = "edges")
+```

@@ -1,0 +1,17 @@
+.Rproj.user
+src/
+raw/
+data/
+output/
+testing_data/
+_pathway_prompts/
+upstream-src/
+..Rcheck/
+*.Rcheck/
+README.html
+.Rhistory
+.RData
+.httr-oauth
+.DS_Store
+.quarto
+.vscode
