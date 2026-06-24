@@ -195,69 +195,71 @@ executeCohortPathways <- function(connectionDetails = NULL,
     on.exit(DatabaseConnector::disconnect(connection))
   }
 
-  # --- Verify target cohort table exists ---
   cohortTableName <- tolower(cohortTableName)
-  tablesInCohortSchema <-
-    DatabaseConnector::getTableNames(
-      connection = connection,
-      databaseSchema = cohortDatabaseSchema
-    ) |>
-    tolower()
-
-  if (!cohortTableName %in% c(tablesInCohortSchema, "")) {
-    stop(
-      paste0(
-        "Target cohort table '", toupper(cohortTableName),
-        "' not found in schema '", cohortDatabaseSchema, "'"
-      )
-    )
-  }
-
-  # --- Verify event/outcome cohort table exists ---
   outcomeTableName <- tolower(outcomeTableName)
-  tablesInOutcomeSchema <-
-    DatabaseConnector::getTableNames(
-      connection = connection,
-      databaseSchema = outcomeDatabaseSchema
-    ) |>
-    tolower()
 
-  if (!outcomeTableName %in% c(tablesInOutcomeSchema, "")) {
-    stop(
-      paste0(
-        "Event/outcome cohort table '", toupper(outcomeTableName),
-        "' not found in schema '", outcomeDatabaseSchema, "'"
+  # For temp tables (#prefix) skip schema: SqlRender translates # to DBMS-specific temp syntax.
+  # For regular tables qualify with schema upfront so all SQL uses a single @cohort_table parameter.
+  targetCohortTable <- if (startsWith(cohortTableName, "#")) cohortTableName else paste0(cohortDatabaseSchema, ".", cohortTableName)
+  eventCohortTable <- if (startsWith(outcomeTableName, "#")) outcomeTableName else paste0(outcomeDatabaseSchema, ".", outcomeTableName)
+
+  # --- Verify cohort tables exist (skipped for temp tables — they are always pre-created) ---
+  if (!startsWith(cohortTableName, "#")) {
+    tablesInCohortSchema <-
+      DatabaseConnector::getTableNames(
+        connection = connection,
+        databaseSchema = cohortDatabaseSchema
+      ) |>
+      tolower()
+
+    if (!cohortTableName %in% c(tablesInCohortSchema, "")) {
+      stop(
+        paste0(
+          "Target cohort table '", toupper(cohortTableName),
+          "' not found in schema '", cohortDatabaseSchema, "'"
+        )
       )
-    )
+    }
   }
 
-  # --- Count cohorts ---
-  # Target cohort counts
-  targetCounts <- DatabaseConnector::renderTranslateQuerySql(
-    connection = connection,
-    sql = "SELECT cohort_definition_id AS cohort_id,
+  if (!startsWith(outcomeTableName, "#")) {
+    tablesInOutcomeSchema <-
+      DatabaseConnector::getTableNames(
+        connection = connection,
+        databaseSchema = outcomeDatabaseSchema
+      ) |>
+      tolower()
+
+    if (!outcomeTableName %in% c(tablesInOutcomeSchema, "")) {
+      stop(
+        paste0(
+          "Event/outcome cohort table '", toupper(outcomeTableName),
+          "' not found in schema '", outcomeDatabaseSchema, "'"
+        )
+      )
+    }
+  }
+
+  countSql <- "SELECT cohort_definition_id AS cohort_id,
               COUNT(*) AS cohort_entries,
               COUNT(DISTINCT subject_id) AS cohort_subjects
-          FROM @cohort_database_schema.@cohort_table
+          FROM @cohort_table
           {@cohort_ids != ''} ? {WHERE cohort_definition_id IN (@cohort_ids)}
-          GROUP BY cohort_definition_id;",
-    cohort_database_schema = cohortDatabaseSchema,
-    cohort_table = cohortTableName,
+          GROUP BY cohort_definition_id;"
+
+  # --- Count cohorts ---
+  targetCounts <- DatabaseConnector::renderTranslateQuerySql(
+    connection = connection,
+    sql = countSql,
+    cohort_table = targetCohortTable,
     cohort_ids = targetCohortIds,
     snakeCaseToCamelCase = TRUE
   )
 
-  # Event cohort counts
   eventCounts <- DatabaseConnector::renderTranslateQuerySql(
     connection = connection,
-    sql = "SELECT cohort_definition_id AS cohort_id,
-              COUNT(*) AS cohort_entries,
-              COUNT(DISTINCT subject_id) AS cohort_subjects
-          FROM @cohort_database_schema.@cohort_table
-          {@cohort_ids != ''} ? {WHERE cohort_definition_id IN (@cohort_ids)}
-          GROUP BY cohort_definition_id;",
-    cohort_database_schema = outcomeDatabaseSchema,
-    cohort_table = outcomeTableName,
+    sql = countSql,
+    cohort_table = eventCohortTable,
     cohort_ids = eventCohortIds,
     snakeCaseToCamelCase = TRUE
   )
@@ -285,9 +287,6 @@ executeCohortPathways <- function(connectionDetails = NULL,
       sprintf("    Found %s of %s event cohorts instantiated.", nEventFound, length(eventCohortIds))
     )
   }
-
-  targetCohortTable <- paste0(cohortDatabaseSchema, ".", cohortTableName)
-  eventCohortTable <- paste0(outcomeDatabaseSchema, ".", outcomeTableName)
 
   instantiatedEventCohortIds <-
     intersect(x = eventCohortIds, y = eventCounts$cohortId)
