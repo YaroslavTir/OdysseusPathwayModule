@@ -525,8 +525,11 @@ executeCohortPathways <- function(connectionDetails = NULL,
     )]
     names(pathwayAnalysisCodesLong)[names(pathwayAnalysisCodesLong) == "comboId"] <- "code"
 
+    # code already identifies the same event-cohort combo across all target cohorts
+    # (shared eventCohortIdIndexMaps); keying on the per-iteration generationId as well
+    # would duplicate a shared code once per target cohort that uses it.
     pathwayAnalysisCodesData <- unique(
-      pathwayAnalysisCodesLong[, c("pathwayAnalysisGenerationId", "code", "isCombo")]
+      pathwayAnalysisCodesLong[, c("code", "isCombo")]
     )
   }
 
